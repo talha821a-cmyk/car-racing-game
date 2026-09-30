@@ -22,6 +22,7 @@
   };
 
   const HIGH_SCORE_KEY = 'street-racer-high-score';
+  const SOUND_ENABLED_KEY = 'street-racer-sound-enabled';
   const trafficColors = ['#ef554a', '#42a6cd', '#e9bc43', '#b5d6d5', '#ae72d0', '#4fbd84'];
   const state = {
     mode: 'menu',
@@ -42,8 +43,9 @@
     scale: 1,
     roadLeft: 0,
     roadWidth: 0,
-    soundEnabled: true,
-    audio: null
+    soundEnabled: loadSoundPreference(),
+    audio: null,
+    music: null
   };
 
   function loadHighScore() {
@@ -53,6 +55,18 @@
 
   function saveHighScore() {
     try { localStorage.setItem(HIGH_SCORE_KEY, String(state.highScore)); }
+    catch { /* Storage can be unavailable in private browsing. */ }
+  }
+
+  function loadSoundPreference() {
+    try {
+      const preference = localStorage.getItem(SOUND_ENABLED_KEY);
+      return preference === null ? true : preference === 'true';
+    } catch { return true; }
+  }
+
+  function saveSoundPreference() {
+    try { localStorage.setItem(SOUND_ENABLED_KEY, String(state.soundEnabled)); }
     catch { /* Storage can be unavailable in private browsing. */ }
   }
 
@@ -391,6 +405,7 @@
     showScreen(null);
     updateHud();
     startEngineSound();
+    startMusic();
     startLoop();
   }
 
@@ -399,6 +414,7 @@
     state.mode = 'paused';
     stopLoop();
     stopEngineSound();
+    fadeMusic(.35);
     showScreen('paused');
   }
 
@@ -407,6 +423,7 @@
     state.mode = 'playing';
     showScreen(null);
     startEngineSound();
+    startMusic();
     startLoop();
   }
 
@@ -415,6 +432,7 @@
     state.mode = 'gameover';
     stopLoop();
     stopEngineSound();
+    fadeMusic(.75);
     stage.classList.add('crash-hit');
     playTone(90, .42, 'sawtooth');
     state.highScore = Math.max(state.highScore, Math.floor(state.score));
@@ -440,6 +458,7 @@
   function returnToMenu() {
     stopLoop();
     stopEngineSound();
+    fadeMusic(.35);
     state.mode = 'menu';
     saveHighScore();
     hud.hidden = true;
@@ -462,6 +481,89 @@
     }
     if (state.audio.state === 'suspended') state.audio.resume();
     return state.audio;
+  }
+
+  const melody = [523.25, 659.25, 783.99, null, 659.25, 587.33, 523.25, null,
+    659.25, 783.99, 880, 783.99, 659.25, null, 587.33, 659.25,
+    523.25, null, 659.25, 783.99, 659.25, 587.33, 523.25, null,
+    587.33, 659.25, 783.99, null, 659.25, 587.33, 523.25, null];
+  const chordProgression = [
+    [261.63, 329.63, 392],
+    [293.66, 392, 493.88],
+    [220, 261.63, 329.63],
+    [261.63, 349.23, 440]
+  ];
+
+  function createMusicVoice(frequency, startTime, duration, volume, attack, release, waveform) {
+    const audio = state.audio;
+    const oscillator = audio.createOscillator();
+    const envelope = audio.createGain();
+    const voice = { oscillator, envelope };
+    oscillator.type = waveform;
+    oscillator.frequency.setValueAtTime(frequency, startTime);
+    envelope.gain.setValueAtTime(.0001, startTime);
+    envelope.gain.linearRampToValueAtTime(volume, startTime + attack);
+    envelope.gain.setTargetAtTime(.0001, startTime + duration, Math.max(.025, release / 3));
+    oscillator.connect(envelope);
+    envelope.connect(state.music.gain);
+    oscillator.onended = () => state.music.voices.delete(voice);
+    state.music.voices.add(voice);
+    oscillator.start(startTime);
+    oscillator.stop(startTime + duration + release);
+  }
+
+  function scheduleMusic() {
+    const music = state.music;
+    const audio = state.audio;
+    if (!music || !music.playing || !state.soundEnabled || state.mode !== 'playing' || audio.state !== 'running') return;
+    const scheduleUntil = audio.currentTime + .2;
+    while (music.nextNoteTime < scheduleUntil) {
+      const step = music.step;
+      const note = melody[step];
+      if (note) createMusicVoice(note, music.nextNoteTime, .23, .11, .035, .14, 'triangle');
+      if (step % 8 === 0) {
+        const chord = chordProgression[Math.floor(step / 8)];
+        chord.forEach(frequency => createMusicVoice(frequency, music.nextNoteTime, 1.45, .022, .28, .32, 'sine'));
+      }
+      music.step = (step + 1) % melody.length;
+      music.nextNoteTime += 60 / (92 + state.difficulty * 10) / 2;
+    }
+  }
+
+  function startMusic() {
+    if (!state.soundEnabled) return;
+    const audio = initAudio();
+    if (!audio) return;
+    if (!state.music) {
+      const gain = audio.createGain();
+      gain.gain.value = .0001;
+      gain.connect(audio.destination);
+      state.music = { gain, voices: new Set(), step: 0, nextNoteTime: 0, timer: 0, playing: false };
+    }
+    const music = state.music;
+    if (music.playing) return;
+    music.playing = true;
+    music.nextNoteTime = audio.currentTime + .05;
+    music.gain.gain.cancelScheduledValues(audio.currentTime);
+    music.gain.gain.setTargetAtTime(.2, audio.currentTime, .16);
+    scheduleMusic();
+    music.timer = window.setInterval(scheduleMusic, 80);
+  }
+
+  function fadeMusic(duration) {
+    const music = state.music;
+    if (!music || !music.playing) return;
+    music.playing = false;
+    window.clearInterval(music.timer);
+    music.timer = 0;
+    const now = state.audio.currentTime;
+    music.gain.gain.cancelScheduledValues(now);
+    music.gain.gain.setTargetAtTime(.0001, now, duration / 3);
+    music.voices.forEach(({ oscillator, envelope }) => {
+      envelope.gain.cancelScheduledValues(now);
+      envelope.gain.setTargetAtTime(.0001, now, .035);
+      try { oscillator.stop(now + duration); } catch { /* Voice already stopped. */ }
+    });
   }
 
   function playTone(frequency, duration, type = 'sine') {
@@ -503,8 +605,7 @@
     state.engineGain = null;
   }
 
-  function toggleSound() {
-    state.soundEnabled = !state.soundEnabled;
+  function updateSoundButtons() {
     const soundButton = document.querySelector('#sound-button');
     const menuButton = document.querySelector('#menu-sound-button');
     soundButton.classList.toggle('sound-muted', !state.soundEnabled);
@@ -512,9 +613,20 @@
     soundButton.title = `Sound ${state.soundEnabled ? 'on' : 'off'}`;
     menuButton.setAttribute('aria-pressed', String(state.soundEnabled));
     menuButton.textContent = `SOUND: ${state.soundEnabled ? 'ON' : 'OFF'}`;
+  }
+
+  function toggleSound() {
+    state.soundEnabled = !state.soundEnabled;
+    saveSoundPreference();
+    updateSoundButtons();
     playTone(520, .07);
-    if (state.soundEnabled && state.mode === 'playing') startEngineSound();
-    else stopEngineSound();
+    if (state.soundEnabled && state.mode === 'playing') {
+      startEngineSound();
+      startMusic();
+    } else {
+      stopEngineSound();
+      fadeMusic(.35);
+    }
   }
 
   document.querySelector('#play-button').addEventListener('click', () => { playTone(520, .08); startGame(); });
@@ -550,5 +662,6 @@
 
   showScreen('menu');
   updateHud();
+  updateSoundButtons();
   resizeCanvas();
 })();
