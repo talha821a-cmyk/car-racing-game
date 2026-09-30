@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#101713">
+  <title>Street Racer</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main class="game-layout">
+    <header class="topbar">
+      <a class="brand" href="#" aria-label="Street Racer home" id="brand-home">
+        <span class="brand-mark" aria-hidden="true">SR</span>
+        <span>STREET<span class="brand-light">RACER</span></span>
+      </a>
+      <div class="topbar-note"><span class="live-dot"></span> ARCADE MODE</div>
+    </header>
+
+    <section class="game-stage" aria-label="Street Racer game">
+      <canvas id="game-canvas" aria-label="Top-down racing road"></canvas>
+
+      <div class="hud" id="game-hud" aria-live="polite" hidden>
+        <div class="hud-stats">
+          <div class="hud-stat"><span class="hud-label">SCORE</span><strong id="score-value">0000</strong></div>
+          <div class="hud-stat"><span class="hud-label">HIGH SCORE</span><strong id="high-score-value">0000</strong></div>
+        </div>
+        <div class="hud-actions">
+          <button class="icon-button" id="sound-button" type="button" aria-label="Turn sound off" title="Sound on">
+            <svg class="sound-on" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10v4h4l5 4V6l-5 4H4Zm12.5-3.5a8 8 0 0 1 0 11m-3-8a4 4 0 0 1 0 5"/></svg>
+            <svg class="sound-off" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10v4h4l5 4V6l-5 4H4Zm12-1 5 6m0-6-5 6"/></svg>
+          </button>
+          <button class="icon-button" id="pause-button" type="button" aria-label="Pause game" title="Pause">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5h3v14H8zM15 5h3v14h-3z"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="screen screen-menu is-visible" id="menu-screen">
+        <div class="screen-content menu-content">
+          <p class="eyebrow"><span></span> THE CITY IS YOURS</p>
+          <h1>STREET<br><span>RACER</span></h1>
+          <p class="tagline">Own the road. Outlast the rush.</p>
+          <div class="menu-buttons">
+            <button class="button button-primary" id="play-button" type="button"><span>PLAY</span><span class="button-arrow" aria-hidden="true">→</span></button>
+            <button class="button button-secondary" id="how-button" type="button">HOW TO PLAY</button>
+            <button class="button button-secondary sound-menu-button" id="menu-sound-button" type="button" aria-pressed="true">SOUND: ON</button>
+          </div>
+          <div class="menu-record"><span>HIGH SCORE</span><strong id="menu-high-score">0000</strong></div>
+        </div>
+        <div class="menu-stamp" aria-hidden="true">NIGHT<br>RUN<br><b>01</b></div>
+      </div>
+
+      <div class="screen" id="how-screen" aria-labelledby="how-title" hidden>
+        <div class="screen-content dialog-content">
+          <p class="eyebrow"><span></span> DRIVER BRIEFING</p>
+          <h2 id="how-title">KNOW THE<br><span>LINES.</span></h2>
+          <div class="instruction-list">
+            <div><span class="instruction-key">←</span><span class="instruction-key">A</span><p>Move one lane left</p></div>
+            <div><span class="instruction-key">→</span><span class="instruction-key">D</span><p>Move one lane right</p></div>
+            <div><span class="instruction-key instruction-key-touch">↔</span><p>Tap the on-screen arrows on mobile</p></div>
+          </div>
+          <p class="briefing-note">Dodge traffic, collect points for every car you pass, and see how long you can stay on the road.</p>
+          <button class="button button-primary" id="how-back-button" type="button"><span>GOT IT</span><span class="button-arrow" aria-hidden="true">→</span></button>
+        </div>
+      </div>
+
+      <div class="screen" id="pause-screen" aria-labelledby="pause-title" hidden>
+        <div class="screen-content compact-content">
+          <p class="eyebrow"><span></span> TAKE A BREATHER</p>
+          <h2 id="pause-title">RACE<br><span>PAUSED.</span></h2>
+          <div class="menu-buttons">
+            <button class="button button-primary" id="resume-button" type="button"><span>RESUME RACE</span><span class="button-arrow" aria-hidden="true">→</span></button>
+            <button class="button button-secondary" id="pause-restart-button" type="button">RESTART</button>
+            <button class="button button-text" id="pause-menu-button" type="button">MAIN MENU</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="screen" id="gameover-screen" aria-labelledby="gameover-title" hidden>
+        <div class="screen-content compact-content gameover-content">
+          <p class="eyebrow"><span></span> ONE LIFE. ONE RUN.</p>
+          <h2 id="gameover-title">GAME<br><span>OVER</span></h2>
+          <div class="result-grid">
+            <div><span>SCORE</span><strong id="final-score">0000</strong></div>
+            <div><span>HIGHEST SCORE</span><strong id="final-high-score">0000</strong></div>
+          </div>
+          <div class="menu-buttons">
+            <button class="button button-primary" id="restart-button" type="button"><span>RESTART</span><span class="button-arrow" aria-hidden="true">→</span></button>
+            <button class="button button-secondary" id="gameover-menu-button" type="button">MAIN MENU</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="touch-controls" id="touch-controls" aria-label="Touch driving controls" hidden>
+        <button class="touch-button" id="left-button" type="button" aria-label="Move left"><span aria-hidden="true">←</span><span class="touch-label">LEFT</span></button>
+        <button class="touch-button" id="right-button" type="button" aria-label="Move right"><span aria-hidden="true">→</span><span class="touch-label">RIGHT</span></button>
+      </div>
+      <div class="stage-caption" aria-hidden="true"><span>METRO DISTRICT</span><span>KM / H <b id="speed-value">084</b></span></div>
+    </section>
+    <footer class="page-footer"><span>STREET RACER <i>·</i> CITY CIRCUIT</span><span>KEEP YOUR EYES ON THE ROAD</span></footer>
+  </main>
+  <script src="script.js"></script>
+</body>
+</html>
