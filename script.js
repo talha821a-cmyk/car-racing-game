@@ -43,9 +43,7 @@
     scale: 1,
     roadLeft: 0,
     roadWidth: 0,
-    soundEnabled: loadSoundPreference(),
-    audio: null,
-    music: null
+      soundEnabled: loadSoundPreference()
   };
 
   function loadHighScore() {
@@ -344,6 +342,7 @@
   function update(deltaSeconds) {
     state.elapsed += deltaSeconds;
     state.difficulty = calculateDifficulty();
+    audioManager.updateSpeed(state.difficulty);
     const roadSpeed = 180 + state.difficulty * 125;
     state.roadOffset = (state.roadOffset + roadSpeed * deltaSeconds) % 10000;
     state.player.x += (state.player.targetX - state.player.x) * Math.min(1, deltaSeconds * 11);
@@ -388,6 +387,7 @@
   }
 
   function startGame() {
+    audioManager.resetForGame();
     state.mode = 'playing';
     state.score = 0;
     state.elapsed = 0;
@@ -404,8 +404,7 @@
     touchControls.hidden = false;
     showScreen(null);
     updateHud();
-    startEngineSound();
-    startMusic();
+    audioManager.startGameplay();
     startLoop();
   }
 
@@ -413,8 +412,7 @@
     if (state.mode !== 'playing') return;
     state.mode = 'paused';
     stopLoop();
-    stopEngineSound();
-    fadeMusic(.35);
+    audioManager.pauseGameplay();
     showScreen('paused');
   }
 
@@ -422,8 +420,7 @@
     if (state.mode !== 'paused') return;
     state.mode = 'playing';
     showScreen(null);
-    startEngineSound();
-    startMusic();
+    audioManager.startGameplay();
     startLoop();
   }
 
@@ -431,10 +428,8 @@
     if (state.mode !== 'playing') return;
     state.mode = 'gameover';
     stopLoop();
-    stopEngineSound();
-    fadeMusic(.75);
+      audioManager.handleCollision();
     stage.classList.add('crash-hit');
-    playTone(90, .42, 'sawtooth');
     state.highScore = Math.max(state.highScore, Math.floor(state.score));
     saveHighScore();
     hud.hidden = true;
@@ -457,8 +452,7 @@
 
   function returnToMenu() {
     stopLoop();
-    stopEngineSound();
-    fadeMusic(.35);
+    audioManager.stopGameplay();
     state.mode = 'menu';
     saveHighScore();
     hud.hidden = true;
@@ -472,17 +466,6 @@
     drawScene(0);
   }
 
-  function initAudio() {
-    if (!state.soundEnabled) return null;
-    if (!state.audio) {
-      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-      if (!AudioContextClass) return null;
-      state.audio = new AudioContextClass();
-    }
-    if (state.audio.state === 'suspended') state.audio.resume();
-    return state.audio;
-  }
-
   const melody = [523.25, 659.25, 783.99, null, 659.25, 587.33, 523.25, null,
     659.25, 783.99, 880, 783.99, 659.25, null, 587.33, 659.25,
     523.25, null, 659.25, 783.99, 659.25, 587.33, 523.25, null,
@@ -494,116 +477,239 @@
     [261.63, 349.23, 440]
   ];
 
-  function createMusicVoice(frequency, startTime, duration, volume, attack, release, waveform) {
-    const audio = state.audio;
-    const oscillator = audio.createOscillator();
-    const envelope = audio.createGain();
-    const voice = { oscillator, envelope };
-    oscillator.type = waveform;
-    oscillator.frequency.setValueAtTime(frequency, startTime);
-    envelope.gain.setValueAtTime(.0001, startTime);
-    envelope.gain.linearRampToValueAtTime(volume, startTime + attack);
-    envelope.gain.setTargetAtTime(.0001, startTime + duration, Math.max(.025, release / 3));
-    oscillator.connect(envelope);
-    envelope.connect(state.music.gain);
-    oscillator.onended = () => state.music.voices.delete(voice);
-    state.music.voices.add(voice);
-    oscillator.start(startTime);
-    oscillator.stop(startTime + duration + release);
-  }
+  const audioManager = {
+    context: null,
+    backgroundMusic: null,
+    engineSound: null,
+    gameOverSound: { source: null, gain: null, playing: false },
+    buttonSound: { source: null, gain: null, playing: false },
+    lastDifficulty: -1,
 
-  function scheduleMusic() {
-    const music = state.music;
-    const audio = state.audio;
-    if (!music || !music.playing || !state.soundEnabled || state.mode !== 'playing' || audio.state !== 'running') return;
-    const scheduleUntil = audio.currentTime + .2;
-    while (music.nextNoteTime < scheduleUntil) {
-      const step = music.step;
-      const note = melody[step];
-      if (note) createMusicVoice(note, music.nextNoteTime, .23, .11, .035, .14, 'triangle');
-      if (step % 8 === 0) {
-        const chord = chordProgression[Math.floor(step / 8)];
-        chord.forEach(frequency => createMusicVoice(frequency, music.nextNoteTime, 1.45, .022, .28, .32, 'sine'));
+    initialize() {
+      if (!state.soundEnabled) return null;
+      if (!this.context) {
+        const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+        if (!AudioContextClass) return null;
+        this.context = new AudioContextClass();
       }
-      music.step = (step + 1) % melody.length;
-      music.nextNoteTime += 60 / (92 + state.difficulty * 10) / 2;
-    }
-  }
+      if (this.context.state === 'suspended') this.context.resume().catch(() => {});
+      if (!this.backgroundMusic) {
+        const gain = this.context.createGain();
+        gain.gain.value = 0;
+        gain.connect(this.context.destination);
+        this.backgroundMusic = { gain, voices: new Set(), step: 0, nextNoteTime: 0, timer: 0, playing: false };
+      }
+      if (!this.engineSound) {
+        const oscillator = this.context.createOscillator();
+        const gain = this.context.createGain();
+        oscillator.type = 'triangle';
+        oscillator.frequency.value = 58;
+        gain.gain.value = 0;
+        oscillator.connect(gain);
+        gain.connect(this.context.destination);
+        oscillator.start();
+        this.engineSound = { oscillator, gain, playing: false };
+      }
+      return this.context;
+    },
 
-  function startMusic() {
-    if (!state.soundEnabled) return;
-    const audio = initAudio();
-    if (!audio) return;
-    if (!state.music) {
+    createMusicVoice(frequency, startTime, duration, volume, attack, release, waveform) {
+      const oscillator = this.context.createOscillator();
+      const envelope = this.context.createGain();
+      const voice = { oscillator, envelope };
+      oscillator.type = waveform;
+      oscillator.frequency.setValueAtTime(frequency, startTime);
+      envelope.gain.setValueAtTime(.0001, startTime);
+      envelope.gain.linearRampToValueAtTime(volume, startTime + attack);
+      envelope.gain.setTargetAtTime(.0001, startTime + duration, Math.max(.025, release / 3));
+      oscillator.connect(envelope);
+      envelope.connect(this.backgroundMusic.gain);
+      oscillator.onended = () => this.backgroundMusic.voices.delete(voice);
+      this.backgroundMusic.voices.add(voice);
+      oscillator.start(startTime);
+      oscillator.stop(startTime + duration + release);
+    },
+
+    scheduleMusic() {
+      const music = this.backgroundMusic;
+      const audio = this.context;
+      if (!music || !music.playing || !state.soundEnabled || state.mode !== 'playing' || audio.state !== 'running') return;
+      const beatLength = 60 / (92 + state.difficulty * 10) / 2;
+      if (music.nextNoteTime < audio.currentTime - beatLength) music.nextNoteTime = audio.currentTime + .02;
+      const scheduleUntil = audio.currentTime + .2;
+      while (music.nextNoteTime < scheduleUntil) {
+        const step = music.step;
+        const note = melody[step];
+        if (note) this.createMusicVoice(note, music.nextNoteTime, .23, .11, .035, .14, 'triangle');
+        if (step % 8 === 0) {
+          const chord = chordProgression[Math.floor(step / 8)];
+          chord.forEach(frequency => this.createMusicVoice(frequency, music.nextNoteTime, 1.45, .022, .28, .32, 'sine'));
+        }
+        music.step = (step + 1) % melody.length;
+        music.nextNoteTime += beatLength;
+      }
+    },
+
+    startBackgroundMusic() {
+      const audio = this.initialize();
+      if (!audio || state.mode !== 'playing') return;
+      const music = this.backgroundMusic;
+      if (music.playing) return;
+      music.playing = true;
+      music.nextNoteTime = audio.currentTime + .05;
+      music.gain.gain.cancelScheduledValues(audio.currentTime);
+      music.gain.gain.setTargetAtTime(.2, audio.currentTime, .16);
+      this.scheduleMusic();
+      music.timer = window.setInterval(() => this.scheduleMusic(), 80);
+    },
+
+    pauseBackgroundMusic() {
+      const music = this.backgroundMusic;
+      if (!music || !music.playing) return;
+      music.playing = false;
+      window.clearInterval(music.timer);
+      music.timer = 0;
+      const now = this.context.currentTime;
+      music.gain.gain.cancelScheduledValues(now);
+      music.gain.gain.setTargetAtTime(0, now, .025);
+      music.voices.forEach(({ oscillator, envelope }) => {
+        envelope.gain.cancelScheduledValues(now);
+        envelope.gain.setTargetAtTime(.0001, now, .015);
+        try { oscillator.stop(now + .08); } catch { /* Voice already stopped. */ }
+      });
+    },
+
+    stopBackgroundMusic() {
+      const music = this.backgroundMusic;
+      if (!music) return;
+      music.playing = false;
+      window.clearInterval(music.timer);
+      music.timer = 0;
+      if (!this.context) return;
+      const now = this.context.currentTime;
+      music.gain.gain.cancelScheduledValues(now);
+      music.gain.gain.setValueAtTime(0, now);
+      music.voices.forEach(({ oscillator, envelope }) => {
+        envelope.gain.cancelScheduledValues(now);
+        envelope.gain.setValueAtTime(0, now);
+        try { oscillator.stop(now + .01); } catch { /* Voice already stopped. */ }
+      });
+    },
+
+    startEngineSound() {
+      const audio = this.initialize();
+      const engine = this.engineSound;
+      if (!audio || !engine || engine.playing) return;
+      engine.playing = true;
+      engine.oscillator.frequency.setTargetAtTime(58 + state.difficulty * 26, audio.currentTime, .18);
+      engine.gain.gain.cancelScheduledValues(audio.currentTime);
+      engine.gain.gain.setTargetAtTime(.018, audio.currentTime, .06);
+    },
+
+    stopEngineSound(immediate = false) {
+      const engine = this.engineSound;
+      if (!engine || !this.context) return;
+      engine.playing = false;
+      const now = this.context.currentTime;
+      engine.gain.gain.cancelScheduledValues(now);
+      if (immediate) engine.gain.gain.setValueAtTime(0, now);
+      else engine.gain.gain.setTargetAtTime(0, now, .025);
+    },
+
+    updateSpeed(difficulty) {
+      if (!this.engineSound?.playing || !this.context || Math.abs(difficulty - this.lastDifficulty) < .015) return;
+      this.lastDifficulty = difficulty;
+      this.engineSound.oscillator.frequency.setTargetAtTime(58 + difficulty * 26, this.context.currentTime, .2);
+    },
+
+    playOneShot(track, frequency, endFrequency, duration, volume, waveform) {
+      const audio = this.initialize();
+      if (!audio || !track) return;
+      this.stopOneShot(track);
+      const source = audio.createOscillator();
       const gain = audio.createGain();
-      gain.gain.value = .0001;
+      const now = audio.currentTime;
+      source.type = waveform;
+      source.frequency.setValueAtTime(frequency, now);
+      if (endFrequency) source.frequency.exponentialRampToValueAtTime(endFrequency, now + duration * .8);
+      gain.gain.setValueAtTime(volume, now);
+      gain.gain.exponentialRampToValueAtTime(.0001, now + duration);
+      source.connect(gain);
       gain.connect(audio.destination);
-      state.music = { gain, voices: new Set(), step: 0, nextNoteTime: 0, timer: 0, playing: false };
+      track.source = source;
+      track.gain = gain;
+      track.playing = true;
+      source.onended = () => {
+        if (track.source !== source) return;
+        track.source = null;
+        track.gain = null;
+        track.playing = false;
+      };
+      source.start(now);
+      source.stop(now + duration + .01);
+    },
+
+    stopOneShot(track) {
+      if (!track?.source || !this.context) return;
+      const source = track.source;
+      const now = this.context.currentTime;
+      if (track.gain) {
+        track.gain.gain.cancelScheduledValues(now);
+        track.gain.gain.setValueAtTime(0, now);
+      }
+      track.source = null;
+      track.gain = null;
+      track.playing = false;
+      try { source.stop(now); } catch { /* Sound already ended. */ }
+    },
+
+    playButtonSound() {
+      this.playOneShot(this.buttonSound, 720, 560, .065, .025, 'sine');
+    },
+
+    playGameOverSound() {
+      this.playOneShot(this.gameOverSound, 330, 88, .48, .07, 'triangle');
+    },
+
+    startGameplay() {
+      if (!state.soundEnabled) return;
+      this.startEngineSound();
+      this.startBackgroundMusic();
+    },
+
+    pauseGameplay() {
+      this.pauseBackgroundMusic();
+      this.stopEngineSound();
+    },
+
+    handleCollision() {
+      this.stopBackgroundMusic();
+      this.stopEngineSound(true);
+      this.stopOneShot(this.buttonSound);
+      this.stopOneShot(this.gameOverSound);
+      this.playGameOverSound();
+    },
+
+    stopGameplay() {
+      this.stopBackgroundMusic();
+      this.stopEngineSound(true);
+      this.stopOneShot(this.buttonSound);
+      this.stopOneShot(this.gameOverSound);
+    },
+
+    resetForGame() {
+      this.stopGameplay();
+      if (this.backgroundMusic) this.backgroundMusic.step = 0;
+      this.lastDifficulty = -1;
+    },
+
+    muteAll() {
+      this.stopBackgroundMusic();
+      this.stopEngineSound(true);
+      this.stopOneShot(this.buttonSound);
+      this.stopOneShot(this.gameOverSound);
     }
-    const music = state.music;
-    if (music.playing) return;
-    music.playing = true;
-    music.nextNoteTime = audio.currentTime + .05;
-    music.gain.gain.cancelScheduledValues(audio.currentTime);
-    music.gain.gain.setTargetAtTime(.2, audio.currentTime, .16);
-    scheduleMusic();
-    music.timer = window.setInterval(scheduleMusic, 80);
-  }
-
-  function fadeMusic(duration) {
-    const music = state.music;
-    if (!music || !music.playing) return;
-    music.playing = false;
-    window.clearInterval(music.timer);
-    music.timer = 0;
-    const now = state.audio.currentTime;
-    music.gain.gain.cancelScheduledValues(now);
-    music.gain.gain.setTargetAtTime(.0001, now, duration / 3);
-    music.voices.forEach(({ oscillator, envelope }) => {
-      envelope.gain.cancelScheduledValues(now);
-      envelope.gain.setTargetAtTime(.0001, now, .035);
-      try { oscillator.stop(now + duration); } catch { /* Voice already stopped. */ }
-    });
-  }
-
-  function playTone(frequency, duration, type = 'sine') {
-    if (!state.soundEnabled) return;
-    const audio = initAudio();
-    if (!audio) return;
-    const oscillator = audio.createOscillator();
-    const gain = audio.createGain();
-    oscillator.type = type;
-    oscillator.frequency.value = frequency;
-    gain.gain.setValueAtTime(.07, audio.currentTime);
-    gain.gain.exponentialRampToValueAtTime(.001, audio.currentTime + duration);
-    oscillator.connect(gain);
-    gain.connect(audio.destination);
-    oscillator.start();
-    oscillator.stop(audio.currentTime + duration);
-  }
-
-  function startEngineSound() {
-    if (!state.soundEnabled || state.engineOscillator) return;
-    const audio = initAudio();
-    if (!audio) return;
-    const oscillator = audio.createOscillator();
-    const gain = audio.createGain();
-    oscillator.type = 'sawtooth';
-    oscillator.frequency.value = 48 + state.difficulty * 30;
-    gain.gain.value = .018;
-    oscillator.connect(gain);
-    gain.connect(audio.destination);
-    oscillator.start();
-    state.engineOscillator = oscillator;
-    state.engineGain = gain;
-  }
-
-  function stopEngineSound() {
-    if (!state.engineOscillator) return;
-    try { state.engineOscillator.stop(); } catch { /* Already stopped. */ }
-    state.engineOscillator = null;
-    state.engineGain = null;
-  }
+  };
 
   function updateSoundButtons() {
     const soundButton = document.querySelector('#sound-button');
@@ -619,19 +725,14 @@
     state.soundEnabled = !state.soundEnabled;
     saveSoundPreference();
     updateSoundButtons();
-    playTone(520, .07);
-    if (state.soundEnabled && state.mode === 'playing') {
-      startEngineSound();
-      startMusic();
-    } else {
-      stopEngineSound();
-      fadeMusic(.35);
-    }
+    if (!state.soundEnabled) audioManager.muteAll();
+    else if (state.mode === 'playing') audioManager.startGameplay();
+    else audioManager.playButtonSound();
   }
 
-  document.querySelector('#play-button').addEventListener('click', () => { playTone(520, .08); startGame(); });
-  document.querySelector('#how-button').addEventListener('click', () => { playTone(390, .06); showScreen('how'); });
-  document.querySelector('#how-back-button').addEventListener('click', () => showScreen('menu'));
+  document.querySelector('#play-button').addEventListener('click', startGame);
+  document.querySelector('#how-button').addEventListener('click', () => { audioManager.playButtonSound(); showScreen('how'); });
+  document.querySelector('#how-back-button').addEventListener('click', () => { audioManager.playButtonSound(); showScreen('menu'); });
   document.querySelector('#pause-button').addEventListener('click', pauseGame);
   document.querySelector('#resume-button').addEventListener('click', resumeGame);
   document.querySelector('#pause-restart-button').addEventListener('click', startGame);
