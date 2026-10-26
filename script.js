@@ -5,7 +5,7 @@
   const context = canvas.getContext('2d');
   const stage = document.querySelector('.game-stage');
   const hud = document.querySelector('#game-hud');
-  const touchControls = document.querySelector('#touch-controls');
+  const crashWarning = document.querySelector('#crash-warning');
   const screens = {
     menu: document.querySelector('#menu-screen'),
     how: document.querySelector('#how-screen'),
@@ -24,6 +24,21 @@
   const HIGH_SCORE_KEY = 'street-racer-high-score';
   const SOUND_ENABLED_KEY = 'street-racer-sound-enabled';
   const trafficColors = ['#ef554a', '#42a6cd', '#e9bc43', '#b5d6d5', '#ae72d0', '#4fbd84'];
+  const trafficSpecs = {
+    car: { width: .5, length: 1.62, speed: 1, windows: 0 },
+    wide: { width: .53, length: 1.64, speed: .98, windows: 0 },
+    large: { width: .55, length: 1.68, speed: .94, windows: 0 },
+    truck: { width: .56, length: 1.7, speed: .88, windows: 0 },
+    van: { width: .54, length: 1.66, speed: .92, windows: 1 },
+    minibus: { width: .57, length: 1.72, speed: .86, windows: 3 },
+    bus: { width: .59, length: 1.78, speed: .8, windows: 5 }
+  };
+  const trafficRoster = ['car', 'car', 'car', 'wide', 'large', 'truck', 'van', 'minibus', 'bus', 'bus'];
+  const minimumSpeed = 84;
+  const maximumSpeed = 150;
+  const jumpRiseDuration = .16;
+  const jumpHoldDuration = .12;
+  const jumpFallDuration = .18;
   const state = {
     mode: 'menu',
     score: 0,
@@ -33,10 +48,15 @@
     roadOffset: 0,
     spawnTimer: 0,
     lastSpawnLane: null,
+    recentTrafficTypes: [],
     lastFrame: 0,
     animationId: 0,
+    crashEffect: null,
+    gestureStart: null,
     objects: [],
-    player: { lane: 1, x: 0, targetX: 0 },
+    pedestrians: [],
+    pedestrianSpawnTimer: 0,
+    player: { lane: 1, x: 0, targetX: 0, jumpTime: -1, jumpPeakHeight: 0, jumpFallTime: -1, jumpTarget: null },
     width: 0,
     height: 0,
     laneWidth: 0,
@@ -73,16 +93,16 @@
   }
 
   function calculateDifficulty() {
-    const timeProgress = Math.min(1, state.elapsed / 240);
+    const timeProgress = Math.min(1, state.elapsed / 300);
     const scoreProgress = Math.min(1, state.score / 6000);
-    return Math.min(1, timeProgress * .82 + scoreProgress * .18);
+    return Math.min(1, timeProgress * .2 + scoreProgress * .8);
   }
 
   function updateHud() {
     ui.score.textContent = formatScore(state.score);
     ui.highScore.textContent = formatScore(state.highScore);
     ui.menuHighScore.textContent = formatScore(state.highScore);
-    ui.speed.textContent = String(Math.round(84 + state.difficulty * 116)).padStart(3, '0');
+    ui.speed.textContent = String(Math.round(minimumSpeed + state.difficulty * (maximumSpeed - minimumSpeed))).padStart(3, '0');
   }
 
   function showScreen(name) {
@@ -108,6 +128,7 @@
     state.scale = state.laneWidth / 100;
     state.player.x = laneCenter(state.player.lane);
     state.player.targetX = state.player.x;
+    resetPedestrians();
     drawScene(0);
   }
 
@@ -121,8 +142,15 @@
     if (!width || !height) return;
     drawScenery(width, height);
     drawRoad(width, height);
-    if (state.mode !== 'gameover') state.objects.forEach(drawTraffic);
-    drawPlayer();
+    drawPedestrians();
+    if (state.mode !== 'gameover') {
+      state.objects.forEach(drawTraffic);
+      drawPlayer();
+    } else if (state.crashEffect) {
+      drawCrashEffect();
+    } else {
+      drawPlayer();
+    }
   }
 
   function drawScenery(width, height) {
@@ -227,34 +255,223 @@
   function drawPlayer() {
     const carWidth = state.laneWidth * .53;
     const carHeight = carWidth * 1.63;
-    const y = state.mode === 'gameover'
+    const baseY = state.mode === 'gameover'
       ? state.height * .54
       : state.height - carHeight - state.height * .09;
-    drawCarShape(state.player.x, y, carWidth, carHeight, '#e4eac6', true);
+    const jumpHeight = getJumpHeight(carHeight);
+    if (jumpHeight > 0) {
+      context.save();
+      context.globalAlpha = .2;
+      context.fillStyle = '#07100a';
+      context.beginPath();
+      context.ellipse(state.player.x, baseY + carHeight * .92, carWidth * .42, carHeight * .12, 0, 0, Math.PI * 2);
+      context.fill();
+      context.restore();
+    }
+    const carY = baseY - jumpHeight;
+    drawCarShape(state.player.x, carY, carWidth, carHeight, '#e4eac6', true);
+    drawPlayerDoors(state.player.x, carY, carWidth, carHeight);
+  }
+
+  function drawPlayerDoors(x, y, width, height) {
+    if (state.player.jumpTime < 0) return;
+    const opening = getDoorOpening() * .55;
+    const doorWidth = width * .16;
+    const doorLength = height * .27;
+    for (const side of [-1, 1]) {
+      context.save();
+      context.translate(x + side * width * .43, y + height * .42);
+      context.rotate(-side * opening);
+      roundedRect(side < 0 ? -doorWidth : 0, 0, doorWidth, doorLength, width * .035, '#e4eac6');
+      context.strokeStyle = 'rgba(35,48,37,.7)';
+      context.lineWidth = Math.max(1, state.scale);
+      context.strokeRect(side < 0 ? -doorWidth : 0, 0, doorWidth, doorLength);
+      context.restore();
+    }
+  }
+
+  function resetPedestrians() {
+    state.pedestrians = [];
+    spawnPedestrianGroup(true);
+    state.pedestrianSpawnTimer = 8 + Math.random() * 4;
+  }
+
+  function spawnPedestrianGroup(initial = false) {
+    const groupSize = 2 + Math.floor(Math.random() * 3);
+    [-1, 1].forEach(side => {
+      for (let index = 0; index < groupSize; index++) {
+        state.pedestrians.push({
+          side,
+          sideOffset: Math.random(),
+          y: -(initial ? 8 : 18) * state.scale - index * (15 + Math.random() * 8) * state.scale,
+          phase: Math.random() * Math.PI * 2,
+          jacket: ['#d6aa4c', '#6c9d8b', '#b96c52', '#7891ad', '#ded4b7'][Math.floor(Math.random() * 5)],
+          trousers: ['#29343a', '#43434a', '#343b30', '#5a4740'][Math.floor(Math.random() * 4)],
+          skin: ['#d9ad87', '#a97052', '#edc6a0', '#80563f'][Math.floor(Math.random() * 4)]
+        });
+      }
+    });
+  }
+
+  function drawPedestrians() {
+    const leftSpace = state.roadLeft;
+    const rightSpace = state.width - state.roadLeft - state.roadWidth;
+    state.pedestrians.forEach(person => {
+      const sideSpace = person.side < 0 ? leftSpace : rightSpace;
+      const margin = 14 * state.scale;
+      const offsetRange = Math.max(0, sideSpace - margin * 2);
+      const perspective = .45 + Math.max(0, Math.min(1, person.y / state.height)) * .65;
+      const x = person.side < 0
+        ? state.roadLeft - margin - person.sideOffset * offsetRange
+        : state.roadLeft + state.roadWidth + margin + person.sideOffset * offsetRange;
+      const stride = Math.sin(state.elapsed * 4 + person.phase) * 2.2 * perspective;
+      const size = state.scale * perspective;
+      context.save();
+      context.translate(x, person.y);
+      context.scale(size, size);
+      context.fillStyle = 'rgba(5,12,8,.32)';
+      context.beginPath();
+      context.ellipse(0, 7.5, 5, 2.1, 0, 0, Math.PI * 2);
+      context.fill();
+      context.lineCap = 'round';
+      context.lineWidth = 1.8;
+      context.strokeStyle = person.trousers;
+      context.beginPath();
+      context.moveTo(-1.5, 3);
+      context.lineTo(-2.3 + stride, 8);
+      context.moveTo(1.5, 3);
+      context.lineTo(2.3 - stride, 8);
+      context.stroke();
+      context.strokeStyle = person.jacket;
+      context.lineWidth = 1.5;
+      context.beginPath();
+      context.moveTo(-2.5, -1);
+      context.lineTo(-4 - stride * .35, 2.5);
+      context.moveTo(2.5, -1);
+      context.lineTo(4 + stride * .35, 2.5);
+      context.stroke();
+      roundedRect(-3.1, -4, 6.2, 8, 2, person.jacket);
+      context.fillStyle = person.skin;
+      context.beginPath();
+      context.arc(0, -6.2, 2.2, 0, Math.PI * 2);
+      context.fill();
+      context.restore();
+    });
+  }
+
+  function getJumpHeight(carHeight = state.laneWidth * .53 * 1.63) {
+    if (state.player.jumpTime < 0) return 0;
+    const time = state.player.jumpTime;
+    if (time < jumpRiseDuration) {
+      const progress = time / jumpRiseDuration;
+      const eased = progress * progress * (3 - 2 * progress);
+      return state.player.jumpPeakHeight * eased;
+    }
+    if (state.player.jumpFallTime < 0) return state.player.jumpPeakHeight;
+    const progress = Math.min(1, state.player.jumpFallTime / jumpFallDuration);
+    const eased = progress * progress * (3 - 2 * progress);
+    return state.player.jumpPeakHeight * (1 - eased);
+  }
+
+  function getDoorOpening() {
+    if (state.player.jumpTime < jumpRiseDuration) {
+      const progress = state.player.jumpTime / jumpRiseDuration;
+      return progress * progress * (3 - 2 * progress);
+    }
+    if (state.player.jumpFallTime < 0) return 1;
+    const progress = Math.min(1, state.player.jumpFallTime / jumpFallDuration);
+    return 1 - progress * progress * (3 - 2 * progress);
+  }
+
+  function jumpPlayer() {
+    if (state.mode !== 'playing' || state.player.jumpTime >= 0) return;
+    const playerHeight = state.laneWidth * .47 * 1.63;
+    const playerTop = state.height - playerHeight - state.height * .09;
+    const playerBottom = playerTop + playerHeight;
+    const leadDistance = state.laneWidth * 1.5;
+    state.player.jumpTarget = state.objects
+      .filter(item => item.lane === state.player.lane && item.y < playerBottom &&
+        item.y + (item.height || state.laneWidth * .7) > playerTop - leadDistance)
+      .sort((first, second) => second.y - first.y)[0] || null;
+    state.player.jumpTime = 0;
+    state.player.jumpPeakHeight = state.laneWidth * .53 * 1.63 * .55;
+    state.player.jumpFallTime = -1;
+  }
+
+  function drawCrashEffect() {
+    const effect = state.crashEffect;
+    if (!effect) return;
+    effect.fragments.forEach(fragment => {
+      context.save();
+      context.globalAlpha = Math.max(0, 1 - effect.elapsed / .85);
+      context.translate(fragment.x, fragment.y);
+      context.rotate(fragment.rotation);
+      context.fillStyle = fragment.color;
+      context.fillRect(-fragment.width / 2, -fragment.height / 2, fragment.width, fragment.height);
+      context.restore();
+    });
+  }
+
+  function createCrashEffect(item) {
+    const playerWidth = state.laneWidth * .53;
+    const playerHeight = playerWidth * 1.63;
+    const playerY = state.height - playerHeight - state.height * .09 - getJumpHeight(playerHeight);
+    const trafficWidth = item.width || state.laneWidth * .52;
+    const trafficHeight = item.height || trafficWidth * 1.62;
+    const trafficX = laneCenter(item.lane) + (item.offsetX || 0);
+    const trafficY = item.y;
+    const fragments = [];
+    const addCarFragments = (x, y, width, height, color) => {
+      for (let index = 0; index < 9; index++) {
+        const angle = Math.random() * Math.PI * 2;
+        const speed = 55 + Math.random() * 190;
+        fragments.push({
+          x: x + (Math.random() - .5) * width * .65,
+          y: y + Math.random() * height * .7,
+          vx: Math.cos(angle) * speed,
+          vy: Math.sin(angle) * speed - 70,
+          rotation: Math.random() * Math.PI,
+          spin: (Math.random() - .5) * 9,
+          width: width * (.12 + Math.random() * .24),
+          height: height * (.08 + Math.random() * .18),
+          color
+        });
+      }
+    };
+    addCarFragments(state.player.x, playerY, playerWidth, playerHeight, '#e4eac6');
+    addCarFragments(trafficX, trafficY, trafficWidth, trafficHeight, item.color || '#ef554a');
+    state.crashEffect = { elapsed: 0, fragments };
+  }
+
+  function animateCrash(timestamp) {
+    const effect = state.crashEffect;
+    if (!effect) return;
+    const deltaSeconds = Math.min((timestamp - state.lastFrame) / 1000 || 0, .04);
+    state.lastFrame = timestamp;
+    effect.elapsed += deltaSeconds;
+    effect.fragments.forEach(fragment => {
+      fragment.x += fragment.vx * deltaSeconds;
+      fragment.y += fragment.vy * deltaSeconds;
+      fragment.vy += 330 * deltaSeconds;
+      fragment.rotation += fragment.spin * deltaSeconds;
+    });
+    drawScene(deltaSeconds);
+    if (effect.elapsed < .85) {
+      state.animationId = requestAnimationFrame(animateCrash);
+    } else {
+      state.crashEffect = null;
+      state.animationId = 0;
+      drawScene(0);
+      crashWarning.classList.remove('is-visible');
+      crashWarning.setAttribute('aria-hidden', 'true');
+      stage.classList.remove('crash-hit');
+      showScreen('gameover');
+    }
   }
 
   function drawTraffic(item) {
     const laneX = laneCenter(item.lane) + (item.offsetX || 0);
-    if (item.type === 'truck') {
-      const w = state.laneWidth * .78;
-      const h = w * 1.85;
-      context.save();
-      context.shadowColor = 'rgba(0,0,0,.42)';
-      context.shadowBlur = 8;
-      context.shadowOffsetY = 4;
-      roundedRect(laneX - w / 2, item.y, w, h, w * .1, item.color);
-      context.shadowColor = 'transparent';
-      roundedRect(laneX - w * .34, item.y + h * .06, w * .68, h * .2, 5, '#23383a');
-      context.fillStyle = '#f8dfa0';
-      context.fillRect(laneX - w * .34, item.y + h * .9, w * .16, h * .035);
-      context.fillRect(laneX + w * .18, item.y + h * .9, w * .16, h * .035);
-      context.fillStyle = 'rgba(20,25,24,.7)';
-      context.fillRect(laneX - w * .54, item.y + h * .23, w * .13, h * .17);
-      context.fillRect(laneX + w * .41, item.y + h * .23, w * .13, h * .17);
-      context.restore();
-      item.width = w;
-      item.height = h;
-    } else if (item.type === 'cone') {
+    if (item.type === 'cone') {
       const w = state.laneWidth * .31;
       const h = w * 1.28;
       context.save();
@@ -276,11 +493,22 @@
       item.width = w * 1.15;
       item.height = h;
     } else {
-      const w = state.laneWidth * .52;
-      const h = w * 1.62;
+      const spec = trafficSpecs[item.type] || trafficSpecs.car;
+      const w = state.laneWidth * spec.width;
+      const h = w * spec.length;
       drawCarShape(laneX, item.y, w, h, item.color);
-      item.width = w * .9;
-      item.height = h * .9;
+      if (spec.windows) {
+        context.save();
+        const windowWidth = w * .58;
+        const windowHeight = h * .105;
+        for (let index = 0; index < spec.windows; index++) {
+          const windowY = item.y + h * (.29 + index * .125);
+          roundedRect(laneX - windowWidth / 2, windowY, windowWidth, windowHeight, w * .035, '#27383b');
+        }
+        context.restore();
+      }
+      item.width = w * .96;
+      item.height = h * .98;
     }
   }
 
@@ -292,25 +520,34 @@
     return lane;
   }
 
+  function chooseTrafficType() {
+    const recentTypes = state.recentTrafficTypes.slice(0, 2);
+    const variedRoster = trafficRoster.filter(type => !recentTypes.includes(type));
+    const roster = variedRoster.length ? variedRoster : trafficRoster;
+    const type = roster[Math.floor(Math.random() * roster.length)];
+    state.recentTrafficTypes.unshift(type);
+    state.recentTrafficTypes.length = Math.min(2, state.recentTrafficTypes.length);
+    return type;
+  }
+
   function spawnTraffic() {
     const difficulty = state.difficulty;
     const roll = Math.random();
-    let type = 'car';
-    if (roll > .9 - difficulty * .16) type = 'cone';
-    else if (roll > .76) type = 'truck';
+    const type = roll > .9 - difficulty * .16 ? 'cone' : chooseTrafficType();
     const lanes = [0, 1, 2];
     const availableLanes = lanes.filter(lane => !state.objects.some(item => item.lane === lane && item.y < state.height * .34));
     if (!availableLanes.length) return;
     const lane = chooseTrafficLane(availableLanes);
-    const speed = (88 + difficulty * 92) * (type === 'truck' ? .9 : 1);
-    state.objects.push({ lane, type, color: trafficColors[Math.floor(Math.random() * trafficColors.length)], y: -120, speed, passed: false });
+    const speedScale = type === 'cone' ? 1 : trafficSpecs[type].speed;
+    state.objects.push({ lane, type, color: trafficColors[Math.floor(Math.random() * trafficColors.length)], y: -120, speedScale, passed: false });
 
     const pairChance = difficulty * .32;
     if (Math.random() < pairChance) {
       const otherLanes = lanes.filter(value => value !== lane && !state.objects.some(item => item.lane === value && item.y < state.height * .3));
       if (otherLanes.length) {
         const pairLane = chooseTrafficLane(otherLanes);
-        state.objects.push({ lane: pairLane, type: Math.random() > .25 ? 'car' : 'truck', color: trafficColors[Math.floor(Math.random() * trafficColors.length)], y: -150, speed: speed * .96, passed: false });
+        const pairType = chooseTrafficType();
+        state.objects.push({ lane: pairLane, type: pairType, color: trafficColors[Math.floor(Math.random() * trafficColors.length)], y: -150, speedScale: trafficSpecs[pairType].speed * .96, passed: false });
       }
     }
   }
@@ -332,7 +569,9 @@
       const edgePadding = state.laneWidth * .035;
       const overlapsX = Math.abs(state.player.x - itemX) < (playerWidth + itemWidth) / 2 - edgePadding;
       const overlapsY = playerY + playerHeight - edgePadding > item.y + edgePadding && playerY + edgePadding < item.y + itemHeight - edgePadding;
+      if (state.player.jumpTime >= 0) continue;
       if (overlapsX && overlapsY) {
+        createCrashEffect(item);
         endGame();
         return;
       }
@@ -341,11 +580,38 @@
 
   function update(deltaSeconds) {
     state.elapsed += deltaSeconds;
-    state.difficulty = calculateDifficulty();
+    const targetDifficulty = calculateDifficulty();
+    state.difficulty += (targetDifficulty - state.difficulty) * Math.min(1, deltaSeconds * 1.35);
     audioManager.updateSpeed(state.difficulty);
     const roadSpeed = 180 + state.difficulty * 125;
+    const trafficSpeed = 88 + state.difficulty * 92;
     state.roadOffset = (state.roadOffset + roadSpeed * deltaSeconds) % 10000;
+    state.pedestrianSpawnTimer -= deltaSeconds;
+    if (state.pedestrianSpawnTimer <= 0) {
+      spawnPedestrianGroup();
+      state.pedestrianSpawnTimer = 8 + Math.random() * 4;
+    }
+    state.pedestrians.forEach(person => {
+      person.y += roadSpeed * .68 * deltaSeconds;
+    });
+    state.pedestrians = state.pedestrians.filter(person => person.y < state.height + 22 * state.scale);
     state.player.x += (state.player.targetX - state.player.x) * Math.min(1, deltaSeconds * 11);
+    if (state.player.jumpTime >= 0) {
+      state.player.jumpTime += deltaSeconds;
+      const playerBottom = state.height - state.height * .09;
+      const targetCleared = !state.player.jumpTarget || state.player.jumpTarget.y >= playerBottom;
+      if (state.player.jumpFallTime < 0 && state.player.jumpTime >= jumpRiseDuration + jumpHoldDuration && targetCleared) {
+        state.player.jumpFallTime = 0;
+      } else if (state.player.jumpFallTime >= 0) {
+        state.player.jumpFallTime += deltaSeconds;
+      }
+      if (state.player.jumpFallTime >= jumpFallDuration) {
+        state.player.jumpTime = -1;
+        state.player.jumpPeakHeight = 0;
+        state.player.jumpFallTime = -1;
+        state.player.jumpTarget = null;
+      }
+    }
     state.spawnTimer -= deltaSeconds;
     const spawnInterval = 1.45 - state.difficulty * .72;
     if (state.spawnTimer <= 0) {
@@ -353,7 +619,7 @@
       state.spawnTimer = spawnInterval * (.82 + Math.random() * .36);
     }
     state.objects.forEach(item => {
-      item.y += (roadSpeed + item.speed) * deltaSeconds;
+      item.y += (roadSpeed + trafficSpeed * (item.speedScale || 1)) * deltaSeconds;
       if (!item.passed && item.y > state.height - state.height * .09) {
         item.passed = true;
         if (item.type !== 'cone') addScore(100);
@@ -394,14 +660,22 @@
     state.difficulty = 0;
     state.spawnTimer = .6;
     state.lastSpawnLane = null;
+    state.recentTrafficTypes = [];
     state.roadOffset = 0;
     state.objects = [];
+    resetPedestrians();
+    state.crashEffect = null;
     state.player.lane = 1;
     state.player.x = laneCenter(1);
     state.player.targetX = state.player.x;
+    state.player.jumpTime = -1;
+    state.player.jumpPeakHeight = 0;
+    state.player.jumpFallTime = -1;
+    state.player.jumpTarget = null;
     stage.classList.remove('crash-hit');
+    crashWarning.classList.remove('is-visible');
+    crashWarning.setAttribute('aria-hidden', 'true');
     hud.hidden = false;
-    touchControls.hidden = false;
     showScreen(null);
     updateHud();
     audioManager.startGameplay();
@@ -428,17 +702,19 @@
     if (state.mode !== 'playing') return;
     state.mode = 'gameover';
     stopLoop();
-      audioManager.handleCollision();
+    audioManager.handleCollision();
     stage.classList.add('crash-hit');
+    crashWarning.classList.add('is-visible');
+    crashWarning.setAttribute('aria-hidden', 'false');
     state.highScore = Math.max(state.highScore, Math.floor(state.score));
     saveHighScore();
     hud.hidden = true;
-    touchControls.hidden = true;
     ui.finalScore.textContent = formatScore(state.score);
     ui.finalHighScore.textContent = formatScore(state.highScore);
     updateHud();
-    showScreen('gameover');
-    drawScene(0);
+    showScreen(null);
+    state.lastFrame = performance.now();
+    state.animationId = requestAnimationFrame(animateCrash);
   }
 
   function addScore(amount) {
@@ -456,11 +732,18 @@
     state.mode = 'menu';
     saveHighScore();
     hud.hidden = true;
-    touchControls.hidden = true;
     state.objects = [];
+    state.crashEffect = null;
     state.player.lane = 1;
     state.player.x = laneCenter(1);
     state.player.targetX = state.player.x;
+    state.player.jumpTime = -1;
+    state.player.jumpPeakHeight = 0;
+    state.player.jumpFallTime = -1;
+    state.player.jumpTarget = null;
+    stage.classList.remove('crash-hit');
+    crashWarning.classList.remove('is-visible');
+    crashWarning.setAttribute('aria-hidden', 'true');
     showScreen('menu');
     updateHud();
     drawScene(0);
@@ -742,14 +1025,63 @@
   document.querySelector('#sound-button').addEventListener('click', toggleSound);
   document.querySelector('#menu-sound-button').addEventListener('click', toggleSound);
   document.querySelector('#brand-home').addEventListener('click', event => { event.preventDefault(); returnToMenu(); });
-  document.querySelector('#left-button').addEventListener('pointerdown', event => { event.preventDefault(); changeLane(-1); });
-  document.querySelector('#right-button').addEventListener('pointerdown', event => { event.preventDefault(); changeLane(1); });
+  canvas.addEventListener('pointerdown', event => {
+    if (state.mode !== 'playing') return;
+    event.preventDefault();
+    const bounds = canvas.getBoundingClientRect();
+    const x = (event.clientX - bounds.left) * state.width / bounds.width;
+    const y = (event.clientY - bounds.top) * state.height / bounds.height;
+    state.gestureStart = { pointerId: event.pointerId, clientX: event.clientX, clientY: event.clientY, x, y };
+    canvas.setPointerCapture(event.pointerId);
+  });
+  canvas.addEventListener('pointermove', event => {
+    const start = state.gestureStart;
+    if (!start || start.pointerId !== event.pointerId || start.handled || state.mode !== 'playing') return;
+    const deltaX = event.clientX - start.clientX;
+    const deltaY = event.clientY - start.clientY;
+    const swipeThreshold = Math.max(28, state.height * .045);
+    if (deltaY <= -swipeThreshold && Math.abs(deltaY) > Math.abs(deltaX) * 1.1) {
+      jumpPlayer();
+      start.handled = true;
+    } else if (Math.abs(deltaX) >= swipeThreshold && Math.abs(deltaX) > Math.abs(deltaY) * 1.1) {
+      changeLane(Math.sign(deltaX));
+      start.handled = true;
+    }
+  });
+  canvas.addEventListener('pointerup', event => {
+    const start = state.gestureStart;
+    state.gestureStart = null;
+    if (!start || start.pointerId !== event.pointerId || start.handled || state.mode !== 'playing') return;
+    const deltaX = event.clientX - start.clientX;
+    const deltaY = event.clientY - start.clientY;
+    const swipeThreshold = Math.max(28, state.height * .045);
+    if (deltaY <= -swipeThreshold && Math.abs(deltaY) > Math.abs(deltaX) * 1.1) {
+      jumpPlayer();
+      return;
+    }
+    if (Math.abs(deltaX) >= swipeThreshold && Math.abs(deltaX) > Math.abs(deltaY) * 1.1) {
+      changeLane(Math.sign(deltaX));
+      return;
+    }
+    if (Math.abs(deltaX) < swipeThreshold && Math.abs(deltaY) < swipeThreshold) {
+      const carWidth = state.laneWidth * .53;
+      const carHeight = carWidth * 1.63;
+      const carY = state.height - carHeight - state.height * .09 - getJumpHeight(carHeight);
+      const onPlayer = Math.abs(start.x - state.player.x) <= carWidth * .65 && start.y >= carY && start.y <= carY + carHeight;
+      if (onPlayer) jumpPlayer();
+      else changeLane(start.x < state.width / 2 ? -1 : 1);
+    }
+  });
+  canvas.addEventListener('pointercancel', event => {
+    if (state.gestureStart?.pointerId === event.pointerId) state.gestureStart = null;
+  });
 
   window.addEventListener('keydown', event => {
     const key = event.key.toLowerCase();
     if (['arrowleft', 'arrowright', ' '].includes(key)) event.preventDefault();
     if (key === 'arrowleft' || key === 'a') changeLane(-1);
     if (key === 'arrowright' || key === 'd') changeLane(1);
+    if (key === ' ') jumpPlayer();
     if (key === 'escape' || key === 'p') {
       if (state.mode === 'playing') pauseGame();
       else if (state.mode === 'paused') resumeGame();
